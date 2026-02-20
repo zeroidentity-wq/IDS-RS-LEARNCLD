@@ -38,16 +38,332 @@ FAZA 11 — Rescrie IDS-RS de la zero (testul final)
 
 ### FAZA 0 — Cum gandeste un programator
 **Status:** Predata
-**Predat in sesiunea:** 2026-02-19
+**Predat in sesiunile:** 2026-02-19, 2026-02-20
 
-**Concepte explicate:**
-- Ce este un algoritm si cum gandesti in pasi
-- Descompunerea problemelor (IDS-RS impartit in 5 probleme mici)
-- Pseudocod — gandesti inainte sa scrii cod
+---
 
-**Exercitii date:**
-- [ ] **0.1** — Scrie pseudocod: gaseste IP-ul cu cele mai multe porturi unice dintr-un fisier de log-uri
-- [ ] **0.2** — Citeste `detector.rs:process_event` (linia 186) si raspunde: ce primeste, ce returneaza, ce verifica?
+#### De ce conteaza?
+
+Cei mai multi incepatori fac o greseala critica: **se arunca direct la cod**. Deschid editorul,
+incep sa scrie, se blocheaza, sterg, o iau de la capat. E ca si cum ai incepe sa construiesti
+o casa fara plan — pui caramizi la intamplare si speri sa iasa bine.
+
+Un programator experimentat petrece **mai mult timp gandind decat scriind cod**. Codul e doar
+traducerea finala a gandirii intr-un limbaj pe care calculatorul il intelege.
+
+---
+
+#### Partea 1 — Ce este un algoritm?
+
+**Un algoritm este o reteta.** E o lista de pasi clari, in ordine, care rezolva o problema.
+
+Exemplu din viata reala — cum faci o omleta:
+
+```
+1. Ia 3 oua din frigider
+2. Sparge ouale intr-un bol
+3. Adauga sare
+4. Bate cu furculita
+5. Pune tigaia pe foc
+6. Adauga ulei
+7. Cand uleiul e cald, toarna ouale
+8. Cand marginile se intaresc, pliaza si scoate
+```
+
+Un algoritm are:
+- **Intrare** (input): oua, sare, ulei
+- **Pasi concreti**: fiecare pas e clar, nu lasa loc de interpretare
+- **Ordine**: nu poti pune ouale in tigaie inainte sa o incalzesti
+- **Iesire** (output): omleta gata
+
+**Un program de calculator e exact la fel** — primeste date (input), le prelucreaza prin pasi
+(algoritm), si produce un rezultat (output).
+
+**Exemplu cu IDS-RS:**
+
+```
+INTRARE: log-uri de la firewall (text brut, pe UDP)
+PASI:    parseaza → numara → decide → alerteaza
+IESIRE:  alerte catre SIEM sau email
+```
+
+---
+
+#### Partea 2 — Descompunerea problemelor
+
+Aceasta este **cea mai importanta abilitate** pe care o poate avea un programator.
+
+**Analogia: mutatul intr-un apartament nou.**
+Daca cineva iti spune "muta-te in apartamentul nou", e o problema enorma. Nu stii de unde
+sa incepi. Dar daca o spargi in bucati:
+
+```
+1. Impacheteaza lucrurile (pe camere: bucatarie, dormitor, baie)
+2. Inchiriaza o duba
+3. Cara cutiile in duba
+4. Conduce la adresa noua
+5. Descarca cutiile
+6. Despacheteaza (pe camere)
+```
+
+Brusc, fiecare pas e simplu. **Niciun pas individual nu e dificil** — problema parea
+dificila doar pentru ca era mare.
+
+**Acelasi principiu cu IDS-RS.** "Construieste un Intrusion Detection System" suna intimidant.
+Dar daca spargem:
+
+```
+Problema mare: "Detecteaza atacatorii in retea"
+
+Subprobleme:
+  1. RECEPTIE    — Primeste text pe un port UDP (retelistica de baza)
+  2. PARSARE     — Din textul brut, extrage: IP, port, protocol, actiune
+  3. DETECTIE    — Numara cate porturi unice a atins un IP. Daca sunt
+                   prea multe intr-un timp scurt → e suspect
+  4. ALERTARE    — Trimite un mesaj de avertizare (UDP catre SIEM, email)
+  5. ORCHESTRARE — Leaga cele 4 pasi intr-un program care ruleaza non-stop
+```
+
+Fiecare subproblema devine un **modul** (un fisier) in codul nostru:
+
+```
+Subproblema       →  Fisier Rust       →  Ce face
+────────────────────────────────────────────────────
+1. RECEPTIE       →  main.rs           →  asculta pe UDP, primeste bytes
+2. PARSARE        →  parser/gaia.rs    →  text brut → struct LogEvent
+                     parser/cef.rs
+3. DETECTIE       →  detector.rs       →  LogEvent → eventual Alert
+4. ALERTARE       →  alerter.rs        →  Alert → mesaj SIEM / email
+5. ORCHESTRARE    →  main.rs           →  leaga totul, ruleaza async
+```
+
+**Observa pattern-ul:** fiecare fisier face **un singur lucru**. Parser-ul nu stie nimic despre
+alerte. Detectorul nu stie nimic despre UDP. Fiecare modul are o **responsabilitate** clara.
+
+Asta se numeste **Separation of Concerns** (separarea responsabilitatilor) — si e probabil
+cel mai important principiu din toata programarea.
+
+**De ce separam?** Daca totul ar fi intr-un singur fisier de 2000 de linii si vrei sa schimbi
+cum parsezi log-urile CEF:
+- Intr-un fisier mare: trebuie sa cauti printre 2000 de linii, te temi sa nu strici
+  detectorul sau alertele
+- Cu module separate: deschizi `cef.rs`, modifici **doar** acolo, restul nu e afectat
+
+E ca diferenta dintre:
+- O camera in care toate lucrurile sunt aruncate la gramada (haos)
+- O casa cu camere separate: bucataria are vesela, dormitorul are haine, baia are
+  prosoape (ordine)
+
+---
+
+#### Partea 3 — Pseudocod: gandesti INAINTE de cod
+
+**Pseudocodul** este cod scris in limba ta, nu intr-un limbaj de programare. E un plan — ca
+un schelet al constructiei.
+
+**De ce pseudocod?** Cand scrii direct in Rust (sau orice limbaj), te lupti cu **doua probleme
+simultan**:
+1. **Logica** — ce trebuie sa faca programul
+2. **Sintaxa** — cum se scrie corect in limbaj (punct si virgula, paranteze, tipuri...)
+
+Pseudocodul elimina problema 2. Te concentrezi **doar pe logica**.
+
+**Exemplu concret: algoritmul de detectie.**
+
+```
+FUNCTIE: proceseaza_eveniment(eveniment)
+  INTRARE: un eveniment de log (IP sursa, port destinatie, protocol)
+  IESIRE:  o lista de alerte (poate fi goala)
+
+  1. Ia IP-ul sursa din eveniment
+  2. Creeaza un "hit" = (port-ul destinatie, momentul curent)
+  3. Adauga hit-ul in jurnalul acelui IP
+     (daca IP-ul e nou, creeaza un jurnal gol mai intai)
+
+  4. Numara porturile UNICE din ultimele 10 secunde (fereastra "fast")
+  5. Daca sunt mai multe decat pragul (ex: 15):
+     - Si daca NU am alertat recent pentru acest IP (cooldown):
+       → Creeaza alerta "Fast Scan"
+       → Marcheaza ca am alertat (seteaza cooldown)
+
+  6. Numara porturile UNICE din ultimele 5 minute (fereastra "slow")
+  7. Daca sunt mai multe decat pragul (ex: 30):
+     - Si daca NU am alertat recent pentru acest IP:
+       → Creeaza alerta "Slow Scan"
+       → Marcheaza cooldown
+
+  8. Returneaza lista de alerte (poate fi goala daca nimic nu e suspect)
+```
+
+**Observa:**
+- Nu e Rust, nu e Python, nu e nimic — e gandirea pura
+- Fiecare pas e clar: NU "proceseaza datele" (prea vag), ci "numara porturile unice din
+  ultimele 10 secunde" (concret)
+- Logica e completa: am acoperit si cazul "nicio alerta"
+
+**Exemplu de pseudocod PROST vs. BUN:**
+
+Prost (prea vag):
+```
+1. Primeste date
+2. Proceseaza
+3. Trimite alerta daca e ceva suspect
+```
+Asta nu e pseudocod, e o descriere vaga. "Proceseaza" — cum? "Ceva suspect" — ce inseamna?
+
+Bun (concret):
+```
+1. Primeste o linie de text de pe UDP
+2. Cauta cuvantul "drop" in linie
+   - Daca nu gaseste "drop", ignora linia, treci la urmatoarea
+3. Extrage IP-ul sursa din campul "src:"
+4. Extrage portul din campul "service:" (GAIA) sau "dpt:" (CEF)
+5. Adauga portul in lista de porturi pentru acel IP
+6. Numara cate porturi UNICE are IP-ul in ultimele 10 secunde
+7. Daca numarul > 15 SI nu am alertat in ultimele 5 minute:
+   → Construieste mesaj de alerta cu IP-ul, porturile, timestamp-ul
+   → Trimite mesajul pe UDP catre SIEM
+```
+
+**Regula:** daca un pas poate fi interpretat in mai multe feluri, e prea vag — sparge-l
+in sub-pasi.
+
+---
+
+#### Partea 4 — Cum faci design la un program
+
+Procesul complet de design, aplicat pe IDS-RS:
+
+**Pasul 1: Intelege PROBLEMA (nu solutia!)**
+
+Inainte de orice, raspunde la 4 intrebari:
+```
+1. CE primeste programul?        → log-uri text pe UDP
+2. CE produce?                   → alerte cand detecteaza scanari
+3. CE reguli aplica?             → >15 porturi unice in 10s = Fast Scan
+                                    >30 porturi unice in 5min = Slow Scan
+4. CE constrangeri are?          → trebuie sa ruleze non-stop
+                                    trebuie sa fie rapid (log-uri vin continuu)
+                                    trebuie sa fie thread-safe (operatii concurente)
+```
+
+**Pasul 2: Identifica DATELE (ce informatii trebuie sa circule)**
+
+```
+Un log brut contine:
+  - IP sursa (cine a trimis pachetul)
+  - IP destinatie (cine a fost tinta)
+  - Port destinatie (ce usa a incercat)
+  - Protocol (TCP/UDP)
+  - Actiune (accept/drop)
+  - Textul original (pentru audit)
+
+O alerta contine:
+  - Tipul scanarii (Fast/Slow)
+  - IP-ul atacatorului
+  - Lista de porturi scanate
+  - Momentul detectiei
+```
+
+Datele astea devin **struct-uri** in Rust (Faza 4), dar deocamdata e suficient sa le identifici.
+
+**Pasul 3: Deseneaza FLUXUL de date**
+
+O diagrama simpla care arata **cum circula datele** prin program:
+
+```
+[Firewall] --text brut--> [Parser] --LogEvent--> [Detector] --Alert--> [Alerter]
+                              |                       |                     |
+                          "traduce"              "decide"              "comunica"
+                        text → struct         struct → alerta?       alerta → SIEM
+```
+
+Fiecare sageata are un **tip de date** clar:
+- text brut → struct LogEvent (parsare)
+- LogEvent → poate Alert (detectie)
+- Alert → mesaj CEF text (alertare)
+
+**Pasul 4: Scrie PSEUDOCODUL pentru fiecare modul**
+
+Parserul (simplificat):
+```
+FUNCTIE: parseaza(linie_text)
+  1. Cauta pattern-ul "drop" in text
+     - Daca nu gasesti → returneaza NIMIC
+  2. Extrage IP-ul sursa
+  3. Extrage portul destinatie
+  4. Extrage protocolul
+  5. Returneaza un LogEvent cu toate campurile completate
+```
+
+Alerter-ul (simplificat):
+```
+FUNCTIE: trimite_alerta(alerta)
+  1. Construieste mesaj CEF cu datele din alerta
+  2. Deschide un socket UDP temporar
+  3. Trimite mesajul catre adresa SIEM-ului
+  4. Daca email-ul e activat:
+     - Construieste corpul email-ului
+     - Conecteaza-te la serverul SMTP
+     - Trimite email-ul
+```
+
+Main (orchestrare):
+```
+FUNCTIE: main
+  1. Citeste configurarea din config.toml
+  2. Creeaza parser-ul (GAIA sau CEF, din config)
+  3. Creeaza detectorul
+  4. Creeaza alerter-ul
+  5. Deschide socket UDP pe portul 5555
+  6. Porneste task de cleanup periodic (curata date vechi)
+  7. BUCLA INFINITA:
+     - Asteapta pachet UDP SAU semnal Ctrl+C
+     - Daca Ctrl+C → opreste programul
+     - Daca pachet UDP:
+       a. Transforma bytes in text
+       b. Pentru fiecare linie din text:
+          - Parseaza linia
+          - Daca parsarea a reusit:
+            - Trimite evenimentul la detector
+            - Daca detectorul returneaza alerte:
+              - Pentru fiecare alerta: trimite-o
+```
+
+**Pasul 5: Verifica cu intrebari**
+
+Inainte de cod, pune-ti aceste intrebari:
+```
+✓ Am acoperit TOATE cazurile? (ce se intampla cu linii invalide? cu accept?)
+✓ Fiecare modul stie DOAR ce trebuie? (parser-ul nu stie de SIEM)
+✓ Datele au un DRUM clar? (de la input la output, fara ambiguitate)
+✓ Ce se intampla cand ceva merge prost? (UDP timeout? SIEM offline?)
+```
+
+---
+
+#### Recapitulare — Cele 3 lucruri esentiale din Faza 0
+
+1. **Descompune problema** — orice problema mare devine usoara daca o spargi in bucati mici.
+   Fiecare bucata = un modul cu o singura responsabilitate.
+
+2. **Pseudocodul vine INAINTE de cod** — gandesti in limba ta, nu in Rust. Daca nu poti
+   explica algoritmul in cuvinte, nu-l poti scrie nici in cod.
+
+3. **Fluxul de date e scheletul programului** — deseneaza cum circula informatia: ce intra,
+   ce transformari sufera, ce iese. Asta devine arhitectura ta.
+
+---
+
+**Exercitii rezolvate:**
+- [x] **0.1** — Pseudocod: gaseste IP-ul cu cele mai multe porturi unice dintr-un fisier de log-uri.
+  Rezolvat corect: deschide fisier, parcurge linie cu linie, grupeaza porturi unice per IP,
+  returneaza IP-ul cu maximum. A identificat singur cazul IP nou vs. existent si unicitatea porturilor.
+- [x] **0.2** — Citeste `detector.rs:process_event` (linia 186): ce primeste, ce returneaza, ce verifica.
+  Rezolvat corect: primeste `&LogEvent`, returneaza `Vec<Alert>`, inregistreaza port+timestamp in DashMap,
+  verifica Fast Scan si Slow Scan cu cooldown. Detaliu adaugat in discutie: sunt 3 conditii simultane
+  (porturi exista, depasesc pragul, IP nu e in cooldown) si ambele tipuri de scan se verifica la fiecare
+  eveniment (poate genera 2 alerte simultan).
 
 **Resurse:**
 - [Think Like a Programmer (V. Anton Spraul)](https://nostarch.com/thinklikeaprogrammer) — primele 2 capitole
