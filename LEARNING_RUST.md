@@ -34,6 +34,46 @@ FAZA 11 — Rescrie IDS-RS de la zero (testul final)
 
 ---
 
+## Arhitectura IDS-RS — Imaginea de ansamblu
+
+> Adaugata in sesiunea 2026-02-21 — context inainte de a intra in detalii
+
+**Analogia:** Reteaua e o cladire de birouri. Firewall-ul e paznicul care blocheaza intrusi.
+IDS-RS e analistul de securitate care citeste registrul paznicului si striga ALERTA
+cand acelasi om a batut la 20 de usi diferite in 10 secunde.
+
+```
+Firewall (log brut)
+        │ UDP :5555
+        ▼
+   [main.rs]          — dirijorul: asculta, coordoneaza, oprire gratiosa (Ctrl+C)
+        │
+   [parser/]    ────► LogEvent { source_ip, dest_port, protocol, action, raw_log }
+        │
+  [detector.rs] ────► Alert { scan_type, source_ip, unique_ports, timestamp }
+        │
+  [alerter.rs]  ────► SIEM (UDP :514 — format CEF)
+                ────► Email (SMTP async)
+```
+
+**Cele doua tipuri de scan detectate:**
+- **Fast Scan** — >15 porturi unice in 10 secunde (scanare agresiva, rapida)
+- **Slow Scan** — >30 porturi unice in 5 minute (scanare lenta, incearca sa evite detectia)
+
+**Fisierele proiectului:**
+| Fisier | Rolul |
+|--------|-------|
+| `main.rs` | Entry point: UDP listener, orchestrare async |
+| `config.rs` | Incarca si valideaza config.toml |
+| `parser/mod.rs` | Trait LogParser + factory function |
+| `parser/gaia.rs` | Parser Checkpoint Gaia (regex + key-value) |
+| `parser/cef.rs` | Parser CEF / ArcSight (split pipe + key=value) |
+| `detector.rs` | Motor detectie: DashMap, Fast/Slow Scan, cleanup |
+| `alerter.rs` | Trimitere alerte: SIEM (UDP) + Email (SMTP async) |
+| `display.rs` | Output CLI colorat ANSI: banner, alerte, stats |
+
+---
+
 ## Progres
 
 ### FAZA 0 — Cum gandeste un programator
@@ -373,18 +413,260 @@ Inainte de cod, pune-ti aceste intrebari:
 
 ### FAZA 1 — Cum comunica calculatoarele
 **Status:** Predata
-**Predat in sesiunea:** 2026-02-19
+**Predat in sesiunile:** 2026-02-19, 2026-02-21
 
-**Concepte explicate:**
-- Adrese IP si porturi (analogia: casa + usa)
-- UDP vs TCP (carte postala vs telefon)
-- Ce este syslog si cum trimite firewall-ul log-uri
-- Ce este un port scan si de ce e periculos
-- Anatomia unui log Checkpoint Gaia
+---
 
-**Exercitii date:**
-- [ ] **1.1** — `ss -tlnp` in terminal: ce porturi sunt deschise pe masina ta?
-- [ ] **1.2** — Trimite un pachet UDP manual la IDS-RS cu `nc -u` si observa output-ul cu `debug = true`
+#### De ce conteaza?
+
+IDS-RS primeste date **din retea**, ruleaza **in retea** si trimite alerte **prin retea**.
+Ca sa intelegi orice linie din `main.rs` (UDP socket), `alerter.rs` (trimitere SIEM),
+sau `parser/gaia.rs` (anatomia log-ului), trebuie sa stii cum comunica calculatoarele.
+Faza aceasta iti da vocabularul de baza — fara el, codul e magie.
+
+---
+
+#### Partea 1 — Adrese IP si porturi
+
+Imagineaza-ti internetul ca un oras cu milioane de case. Fiecare casa are o **adresa**
+(ca sa stii unde trimiti ceva) si mai multe **usi** (ca sa stii la ce serviciu bati).
+
+**Adresa IP** = adresa casei.
+
+Exista doua tipuri:
+- **IP privat** — adrese folosite in reteaua locala. Routerul tau le atribuie.
+  Nu sunt accesibile direct din internet.
+  Intervalele rezervate: `10.x.x.x`, `192.168.x.x`, `172.16-31.x.x`
+- **IP public** — adresa pe care o vede internetul. Fiecare router are una unica.
+
+**Portul** = numarul usii din casa. Fiecare serviciu "asculta" pe o usa specifica:
+
+```
+Port  22  → SSH (acces la distanta la terminal)
+Port  25  → SMTP (trimitere email)
+Port  53  → DNS (traducere nume → IP)
+Port  80  → HTTP (web neencriptat)
+Port 443  → HTTPS (web encriptat)
+Port 514  → Syslog (log-uri de retea, standardul)
+Port 5555 → IDS-RS (unde ascultam noi log-urile)
+```
+
+Cand un calculator vrea sa comunice, specifica **ambele**: IP + port.
+
+```
+192.168.1.5:443  →  "Casa 192.168.1.5, usa 443 (HTTPS)"
+10.0.0.1:22      →  "Casa 10.0.0.1, usa 22 (SSH)"
+```
+
+Fara port, adresa IP nu e suficienta — e ca si cum ai sti adresa orasului, dar nu
+stii la ce usa sa bati.
+
+---
+
+#### Partea 2 — TCP vs UDP
+
+Sunt doua "protocoale de transport" — doua moduri diferite de a trimite date in retea.
+
+**TCP — ca un apel telefonic**
+
+Inainte sa trimiti date, **stabilesti o conexiune**. Procesul se numeste **3-way handshake**:
+
+```
+Calculator A          Calculator B
+    │                      │
+    │──── SYN ────────────▶│   "Buna, pot sa vorbesc?"
+    │◀─── SYN-ACK ─────────│   "Da, te ascult!"
+    │──── ACK ────────────▶│   "Perfect, vorbim."
+    │                      │
+    │══ date (bidirectional)│   (conexiune stabilita)
+```
+
+TCP **garanteaza**:
+- Ca datele ajung (daca nu ajung, retrimite automat)
+- Ca ajung in ordine
+- Ca nu sunt duplicate
+
+**Dezavantaj:** mai lent, mai mult overhead (trafic suplimentar pentru confirmare).
+
+**Folosit pentru:** HTTP/HTTPS, SSH, email — orice unde conteaza fiecare byte.
+
+---
+
+**UDP — ca o carte postala**
+
+Trimiti si... uiti. Nu stii daca a ajuns. Nu te intereseaza ordinea. Nu e nicio conexiune.
+
+```
+Calculator A          Calculator B
+    │                      │
+    │──── pachet ─────────▶│   (poate ajunge, poate nu)
+    │──── pachet ─────────▶│   (poate ajunge in alta ordine)
+    │──── pachet ─────────▶│   (nu exista confirmare)
+```
+
+**Avantaje:** rapid, simplu, fara overhead.
+**Dezavantaj:** fara garantii de livrare sau ordine.
+
+**Folosit pentru:** DNS, syslog, streaming video, jocuri online — orice unde
+viteza conteaza mai mult decat perfectiunea.
+
+**De ce syslog foloseste UDP?**
+Un firewall poate genera sute de log-uri pe secunda. Daca ar folosi TCP, ar trebui
+sa stabileasca o conexiune pentru fiecare log, sa astepte confirmarea, etc. Cu UDP,
+trimite si gata — daca un log se pierde, lumea nu se prabuseste. Syslog prefera
+viteza si simplitatea in detrimentul garantiei de livrare.
+
+---
+
+#### Partea 3 — Ce este syslog si cum functioneaza
+
+**Syslog** este un protocol standard (RFC 3164) pentru transmiterea log-urilor in retea.
+Practic, echipamentele de retea (routere, firewall-uri, switch-uri) trimit evenimentele
+lor de securitate catre un server central — in text, pe UDP.
+
+Scenariul exact in IDS-RS:
+
+```
+[Firewall Checkpoint]
+        │
+        │  UDP catre <IP_IDS-RS>:5555
+        │  (sute de linii de text/secunda)
+        ▼
+[IDS-RS — asculta pe 0.0.0.0:5555]
+        │
+        ├──▶ Parser  → transforma textul intr-un struct LogEvent
+        ├──▶ Detector → decide daca LogEvent e suspect → Alert
+        └──▶ Alerter  → trimite Alert catre SIEM sau email
+```
+
+`0.0.0.0` inseamna "asculta pe TOATE interfetele de retea ale serverului" —
+nu conteaza pe ce IP vine pachetul, cat timp ajunge pe portul 5555.
+
+---
+
+#### Partea 4 — Ce este un port scan si de ce e periculos
+
+Un **port scan** este primul pas al unui atac. Atacatorul vrea sa afle **ce servicii
+ruleaza** pe o masina inainte sa atace propriu-zis.
+
+**Cum functioneaza:**
+
+```
+Atacator (1.2.3.4) incearca sa se conecteze la:
+  target:22    → DROP  (SSH nu e disponibil)
+  target:80    → DROP  (HTTP nu e disponibil)
+  target:443   → ACCEPT (HTTPS e deschis!)
+  target:3306  → DROP  (MySQL nu e disponibil)
+  target:8080  → ACCEPT (alt serviciu web!)
+  ...
+```
+
+Fiecare DROP genereaza un log in firewall.
+IDS-RS vede ca `1.2.3.4` a atins 15 porturi diferite in 10 secunde si trage concluzia:
+**Fast Scan detectat!**
+
+**De ce e periculos?** Scanul in sine nu face rau direct. Dar atacatorul afla:
+- Ce servicii sunt expuse (pe ce porturi sa atace)
+- Ce versiuni de software ruleaza (din bannere de conectare)
+- Unde sunt punctele vulnerabile
+
+**Pattern-ul pe care IDS-RS il detecteaza:**
+- **Fast Scan** — >15 porturi unice in 10 secunde (scanare agresiva, rapida)
+- **Slow Scan** — >30 porturi unice in 5 minute (scanare lenta, incercand sa evite detectia)
+
+---
+
+#### Partea 5 — Anatomia unui log Checkpoint Gaia
+
+Acesta este textul real pe care IDS-RS il primeste pe UDP de la un firewall Checkpoint:
+
+```
+<134>1 2024-01-15T10:23:45Z checkpoint1 CheckPoint 12345 - \
+Checkpoint: 15Jan2024 10:23:45 drop rule 42 TCP src 1.2.3.4 \
+sport 54321 dst 10.0.0.5 service 22 proto tcp
+```
+
+Descompus camp cu camp:
+
+```
+<134>              → Prioritatea syslog (encodeaza facility + severity ca numar)
+2024-01-15T10:...  → Timestamp RFC 3339 (cand a trimis firewall-ul pachetul)
+checkpoint1        → Hostname-ul firewall-ului (de unde vine log-ul)
+CheckPoint         → Programul care a generat log-ul
+Checkpoint:        → Marcatorul pe care parser-ul il cauta in regex
+
+15Jan2024 10:23:45 → Timestamp intern Gaia (format diferit!)
+drop               → ACTIUNEA (asta ne intereseaza — accept/drop/reject)
+rule 42            → Regula firewall care a declansat evenimentul
+TCP                → Protocolul de transport
+src 1.2.3.4        → IP-ul ATACATORULUI (sursa pachetului)
+sport 54321        → Portul sursa al atacatorului (ales aleatoriu de OS)
+dst 10.0.0.5       → IP-ul tintei (destinatia pachetului)
+service 22         → Portul DESTINATIE (SSH — ce incerca atacatorul sa acceseze)
+proto tcp          → Protocolul (redundant cu TCP de mai sus, dar e in log)
+```
+
+**Ce extrage parser-ul nostru:**
+- `src` = `1.2.3.4` — IP-ul atacatorului
+- `service` = `22` — portul tinta (ce usa a incercat)
+- `proto` = `tcp` — protocolul
+- `action` = `drop` — firewall-ul a blocat
+
+Daca `action != drop` (adica `accept` sau `reject`), log-ul este ignorat —
+nu ne intereseaza traficul legitim, doar tentativele blocate.
+
+---
+
+#### Recapitulare — Cele 3 lucruri esentiale din Faza 1
+
+1. **IP + Port = adresa completa** — fara port, IP-ul nu e suficient.
+   Orice comunicare in retea specifica ambele. In Rust: `"0.0.0.0:5555"`.
+
+2. **UDP pentru viteza, TCP pentru garantii** — syslog foloseste UDP pentru ca
+   log-urile vin continuu si rapid. Un log pierdut e acceptabil; latenta nu e.
+
+3. **Un log DROP = o tentativa blocata** — din perspectiva IDS, DROP-urile sunt
+   semnalele interesante. Multe DROP-uri de la acelasi IP catre porturi diferite
+   = port scan = alerta.
+
+---
+
+**Exercitii:**
+- [x] **1.0** — *(sesiunea 2026-02-21)* Citeste aceasta linie de log reala si raspunde la 4 intrebari:
+  ```
+  Sep 3 15:12:20 192.168.99.1 Checkpoint: 3Sep2007 15:12:08 drop 192.168.11.7 >eth8
+  rule: 113; src: 192.168.11.34; dst: 4.23.34.126; proto: tcp; service: 80; s_port: 2854;
+  ```
+  1. Care este IP-ul atacatorului?
+  2. La ce port a batut?
+  3. Ce a decis firewall-ul?
+  4. De ce exista doua timestamp-uri diferite (15:12:20 si 15:12:08)?
+
+  **Raspunsuri date / corectii:**
+  - IP atacator: `192.168.11.34` (din campul `src:`) — CORECT
+  - Port: initial ales `s_port: 2854` (portul sursa, aleator) — GRESIT
+    - Corect: `service: 80` = portul DESTINATIE (usa la care a batut)
+    - Analogie telefon: `s_port` = linia de pe care suni (aleatoare), `service` = numarul la care suni
+    - IDS-ul numara porturile DESTINATIE (service), nu porturile sursa
+  - Decizie firewall: `drop` — CORECT. Regula `rule: 113` a decis blocarea.
+  - Doua timestamp-uri: `15:12:20` = cand a PRIMIT serverul de log | `15:12:08` = cand a GENERAT firewall-ul evenimentul
+    - Diferenta de 12 secunde = latenta retea + buffering syslog (normal si asteptat)
+
+  **Campuri complete explicate:**
+  | Camp | Valoare | Semnificatie |
+  |------|---------|-------------|
+  | `src` | `192.168.11.34` | IP atacatorul (sursa pachetului) |
+  | `service` | `80` | Portul destinatie — usa la care a batut (HTTP) |
+  | `s_port` | `2854` | Portul sursa aleator — ales de OS, ignorat de IDS |
+  | `dst` | `4.23.34.126` | IP-ul tintei (destinatia pachetului) |
+  | `drop` | — | Firewall-ul a blocat conexiunea (regula 113) |
+  | `proto: tcp` | — | Protocolul de transport folosit |
+
+  **Intrebare de verificare (nerezolvata inca):**
+  > Daca IDS-RS vede ca 192.168.11.34 a batut la porturile 80, 443, 22, 3306, 8080 in 10 secunde
+  > — ce camp din log foloseste IDS-ul ca sa numere porturile? `service` sau `s_port`? De ce?
+- [ ] **1.1** — `ss -tlnp` in terminal: ce porturi sunt deschise pe masina ta? Identifica cel putin 3 si spune ce serviciu ruleaza pe fiecare.
+- [ ] **1.2** — Trimite un pachet UDP manual la IDS-RS cu `echo "test" | nc -u 127.0.0.1 5555` si observa output-ul cu `debug = true` in `config.toml`.
 
 **Resurse:**
 - [Computer Networking: A Top-Down Approach](https://gaia.cs.umass.edu/kurose_ross/online_lectures.htm) — primele 2 capitole
